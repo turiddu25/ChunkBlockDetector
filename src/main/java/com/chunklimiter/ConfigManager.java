@@ -78,7 +78,8 @@ public class ConfigManager {
         public boolean enabled = true;
 
         /** 
-         * Block limits - key is block ID (e.g., "minecraft:hopper"), value is max per chunk per player.
+         * Block limits - key is block ID (e.g., "minecraft:hopper"), value is max per chunk TOTAL.
+         * This is NOT per-player - it's the total number allowed in any chunk by all players combined.
          * Use -1 for unlimited.
          */
         public Map<String, Integer> blockLimits = new HashMap<>();
@@ -89,11 +90,11 @@ public class ConfigManager {
         /** Whether to send a message when a player hits a limit */
         public boolean sendLimitMessage = true;
 
-        /** Message sent when limit is reached. Placeholders: %block%, %limit%, %current% */
-        public String limitReachedMessage = "<red>You can only place <yellow>%limit%</yellow> <gold>%block%</gold> per chunk! (Currently: %current%)</red>";
+        /** Message sent when limit is reached. Placeholders: <block>, <limit>, <current> */
+        public String limitReachedMessage = "<red>You can only place <yellow><limit></yellow> <gold><block></gold> per chunk! (Currently: <current>)</red>";
 
-        /** Message sent as warning when approaching limit. Placeholders: %block%, %limit%, %current% */
-        public String limitWarningMessage = "<yellow>Warning: You have placed <gold>%current%/%limit%</gold> %block% in this chunk.</yellow>";
+        /** Message sent as warning when approaching limit. Placeholders: <block>, <limit>, <current> */
+        public String limitWarningMessage = "<yellow>Warning: You have placed <gold><current>/<limit></gold> <block> in this chunk.</yellow>";
 
         /** Percentage of limit to show warning (0.0 to 1.0, e.g., 0.8 = 80%) */
         public double warningThreshold = 0.8;
@@ -101,20 +102,12 @@ public class ConfigManager {
         /** Whether to show warning messages */
         public boolean showWarnings = true;
 
+        /** Enable debug logging */
+        public boolean debug = false;
+
         public ConfigData() {
             // Default example limits
-            blockLimits.put("minecraft:hopper", 16);
-            blockLimits.put("minecraft:chest", 54);
-            blockLimits.put("minecraft:trapped_chest", 27);
-            blockLimits.put("minecraft:barrel", 54);
-            blockLimits.put("minecraft:dispenser", 16);
-            blockLimits.put("minecraft:dropper", 16);
-            blockLimits.put("minecraft:piston", 32);
-            blockLimits.put("minecraft:sticky_piston", 32);
-            blockLimits.put("minecraft:observer", 32);
-            blockLimits.put("minecraft:comparator", 32);
             blockLimits.put("minecraft:repeater", 64);
-            blockLimits.put("minecraft:redstone_lamp", 32);
             // Cobblemon blocks
             blockLimits.put("cobblemon:healing_machine", 2);
             blockLimits.put("cobblemon:pc", 4);

@@ -12,9 +12,18 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.LevelChunk;
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class ChunkBlockLimiter implements ModInitializer {
     private static ConfigManager config;
@@ -24,8 +33,27 @@ public class ChunkBlockLimiter implements ModInitializer {
     private static MinecraftServer server;
     private static final MiniMessage MINI = MiniMessage.miniMessage();
     
+    // Cache for chunk block counts: "dimension_chunkX_chunkZ_blockId" -> count
+    // This cache is invalidated when blocks are placed/broken
+    private static final Map<String, CachedCount> countCache = new ConcurrentHashMap<>();
+    private static final long CACHE_DURATION_MS = 5000; // 5 second cache
+    
     private int tickCounter = 0;
     private static final int SAVE_INTERVAL_TICKS = 6000; // 5 minutes
+
+    private static class CachedCount {
+        final int count;
+        final long timestamp;
+        
+        CachedCount(int count) {
+            this.count = count;
+            this.timestamp = System.currentTimeMillis();
+        }
+        
+        boolean isExpired() {
+            return System.currentTimeMillis() - timestamp > CACHE_DURATION_MS;
+        }
+    }
 
     @Override
     public void onInitialize() {
@@ -53,16 +81,19 @@ public class ChunkBlockLimiter implements ModInitializer {
                 adventure.close();
                 adventure = null;
             }
+            countCache.clear();
             server = null;
         });
 
-        // Periodic save
+        // Periodic save and cache cleanup
         ServerTickEvents.END_SERVER_TICK.register(srv -> {
             tickCounter++;
             if (tickCounter >= SAVE_INTERVAL_TICKS) {
                 tickCounter = 0;
                 if (storage != null) storage.saveDirty();
                 if (tracker != null) tracker.saveIfDirty();
+                // Clean expired cache entries
+                countCache.entrySet().removeIf(e -> e.getValue().isExpired());
             }
         });
 
@@ -75,12 +106,19 @@ public class ChunkBlockLimiter implements ModInitializer {
     }
 
     /**
+     * Check if a block type has a configured limit.
+     */
+    public static boolean hasLimit(String blockId) {
+        return config != null && config.hasLimit(blockId);
+    }
+
+    /**
      * Check if a block placement should be blocked.
-     * Called from the mixin BEFORE the block is placed.
+     * This uses ACTUAL block counting in the chunk - completely foolproof.
      * 
      * @return true if placement should be BLOCKED, false if allowed
      */
-    public static boolean shouldBlockPlacement(ServerPlayer player, net.minecraft.world.level.Level world, 
+    public static boolean shouldBlockPlacement(ServerPlayer player, ServerLevel level, 
                                                BlockPos pos, String blockId) {
         if (config == null || !config.get().enabled) {
             return false;
@@ -97,13 +135,8 @@ public class ChunkBlockLimiter implements ModInitializer {
             return false; // No limit configured
         }
 
-        // Get current count for this player in this chunk
-        int currentCount = storage.getCount(
-            world.dimension(), 
-            pos, 
-            player.getUUID(), 
-            blockId
-        );
+        // Count actual blocks in the chunk (this is the foolproof part)
+        int currentCount = countBlocksInChunk(level, pos, blockId);
 
         // Check if at or over limit
         if (currentCount >= limit) {
@@ -121,28 +154,124 @@ public class ChunkBlockLimiter implements ModInitializer {
         }
 
         // Check for warning threshold
-        if (config.get().showWarnings && currentCount >= limit * config.get().warningThreshold) {
+        if (config.get().showWarnings && (currentCount + 1) >= limit * config.get().warningThreshold) {
             if (adventure != null) {
                 String message = config.get().limitWarningMessage;
                 Component parsed = MINI.deserialize(message,
                     Placeholder.unparsed("block", formatBlockName(blockId)),
                     Placeholder.unparsed("limit", String.valueOf(limit)),
-                    Placeholder.unparsed("current", String.valueOf(currentCount + 1)) // +1 because this placement will succeed
+                    Placeholder.unparsed("current", String.valueOf(currentCount + 1))
                 );
                 adventure.player(player.getUUID()).sendMessage(parsed);
             }
         }
 
-        // Allow placement and track it
-        storage.incrementBlock(world.dimension(), pos, player.getUUID(), blockId);
-        tracker.recordPlacement(world.dimension(), pos, player.getUUID());
-        
         return false; // ALLOW the placement
     }
 
     /**
-     * Handle block breaking - decrement the placer's count.
-     * Called from the mixin BEFORE the block is actually removed.
+     * Count blocks of a specific type in a chunk.
+     * This scans the actual chunk - completely accurate.
+     */
+    public static int countBlocksInChunk(ServerLevel level, BlockPos pos, String blockId) {
+        ChunkPos chunkPos = new ChunkPos(pos);
+        String cacheKey = level.dimension().location() + "_" + chunkPos.x + "_" + chunkPos.z + "_" + blockId;
+        
+        // Check cache first
+        CachedCount cached = countCache.get(cacheKey);
+        if (cached != null && !cached.isExpired()) {
+            return cached.count;
+        }
+        
+        // Get the block to search for
+        ResourceLocation blockLoc = ResourceLocation.tryParse(blockId);
+        if (blockLoc == null) {
+            return 0;
+        }
+        
+        Block targetBlock = BuiltInRegistries.BLOCK.get(blockLoc);
+        if (targetBlock == null) {
+            return 0;
+        }
+        
+        // Get the chunk
+        LevelChunk chunk = level.getChunk(chunkPos.x, chunkPos.z);
+        
+        // Count blocks
+        int count = 0;
+        int minY = level.getMinBuildHeight();
+        int maxY = level.getMaxBuildHeight();
+        int startX = chunkPos.getMinBlockX();
+        int startZ = chunkPos.getMinBlockZ();
+        
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) {
+                for (int y = minY; y < maxY; y++) {
+                    BlockPos checkPos = new BlockPos(startX + x, y, startZ + z);
+                    BlockState state = chunk.getBlockState(checkPos);
+                    if (state.is(targetBlock)) {
+                        count++;
+                    }
+                }
+            }
+        }
+        
+        // Cache the result
+        countCache.put(cacheKey, new CachedCount(count));
+        
+        if (config != null && config.get().debug) {
+            Constants.LOGGER.info("[DEBUG] Counted {} {} in chunk [{}, {}]", 
+                count, blockId, chunkPos.x, chunkPos.z);
+        }
+        
+        return count;
+    }
+
+    /**
+     * Invalidate cache for a chunk when blocks change.
+     */
+    public static void invalidateChunkCache(ServerLevel level, BlockPos pos) {
+        ChunkPos chunkPos = new ChunkPos(pos);
+        String prefix = level.dimension().location() + "_" + chunkPos.x + "_" + chunkPos.z + "_";
+        countCache.entrySet().removeIf(e -> e.getKey().startsWith(prefix));
+    }
+
+    /**
+     * Called AFTER a block is successfully placed.
+     * Records placement for per-player tracking (admin visibility).
+     * Also invalidates cache.
+     */
+    public static void onBlockPlaced(ServerPlayer player, BlockPos pos, String blockId) {
+        if (config == null || storage == null || tracker == null) return;
+        if (!config.get().enabled) return;
+        
+        // Only track blocks that have limits
+        if (!config.hasLimit(blockId)) return;
+
+        // Invalidate cache for this chunk
+        if (player.level() instanceof ServerLevel serverLevel) {
+            invalidateChunkCache(serverLevel, pos);
+        }
+
+        // Skip per-player tracking if player has bypass
+        if (player.hasPermissions(config.get().bypassPermissionLevel)) return;
+
+        // Record for per-player tracking (admin visibility)
+        storage.incrementBlock(player.level().dimension(), pos, player.getUUID(), blockId);
+        tracker.recordPlacement(player.level().dimension(), pos, player.getUUID());
+
+        if (config.get().debug) {
+            int chunkCount = 0;
+            if (player.level() instanceof ServerLevel serverLevel) {
+                chunkCount = countBlocksInChunk(serverLevel, pos, blockId);
+            }
+            Constants.LOGGER.info("[DEBUG] Block placed: {} at {} by {} (chunk total: {})", 
+                blockId, pos, player.getScoreboardName(), chunkCount);
+        }
+    }
+
+    /**
+     * Handle block breaking - for per-player tracking and cache invalidation.
      */
     public static void onBlockBroken(ServerPlayer breaker, BlockPos pos, BlockState blockState) {
         if (config == null || storage == null || tracker == null) return;
@@ -153,15 +282,22 @@ public class ChunkBlockLimiter implements ModInitializer {
         // Only track blocks that have limits
         if (!config.hasLimit(blockId)) return;
 
-        // Find who placed this block
+        // Invalidate cache for this chunk
+        if (breaker.level() instanceof ServerLevel serverLevel) {
+            invalidateChunkCache(serverLevel, pos);
+        }
+
+        // Find who placed this block and update per-player tracking
         java.util.UUID placerId = tracker.removePlacement(breaker.level().dimension(), pos);
         
         if (placerId != null) {
-            // Decrement the placer's count (not the breaker's)
             storage.decrementBlock(breaker.level().dimension(), pos, placerId, blockId);
+            
+            if (config.get().debug) {
+                Constants.LOGGER.info("[DEBUG] Block broken: {} at {} by {} (placer: {})", 
+                    blockId, pos, breaker.getScoreboardName(), placerId);
+            }
         }
-        // If we don't know who placed it (e.g., placed before mod was installed), 
-        // we can't decrement anyone's count - this is the safest approach
     }
 
     private static String formatBlockName(String blockId) {

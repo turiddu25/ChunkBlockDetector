@@ -191,6 +191,62 @@ public class ChunkBlockStorage {
     }
 
     /**
+     * Get all chunk data for a specific player across all chunks.
+     * This scans both cached data and disk files.
+     * Returns a map of chunkKey -> Map of blockId -> count
+     */
+    public Map<String, Map<String, Integer>> getAllPlayerData(UUID playerId) {
+        Map<String, Map<String, Integer>> result = new java.util.HashMap<>();
+        
+        // First, save any dirty data so disk is up to date
+        saveDirty();
+        
+        // Scan all data files on disk
+        try {
+            if (Files.exists(DATA_DIR)) {
+                Files.list(DATA_DIR)
+                    .filter(p -> p.toString().endsWith(".json"))
+                    .forEach(file -> {
+                        String filename = file.getFileName().toString();
+                        String chunkKey = filename.substring(0, filename.length() - 5)
+                            .replace("_", ":");  // Restore colons
+                        // Fix: the key format is "dimension_x_z", need to handle underscores in dimension name
+                        // Actually let's just load the file and get the chunkKey from it
+                        try {
+                            ChunkBlockData data = cache.get(chunkKey);
+                            if (data == null) {
+                                // Load from disk
+                                try (Reader reader = Files.newBufferedReader(file)) {
+                                    data = GSON.fromJson(reader, ChunkBlockData.class);
+                                }
+                            }
+                            if (data != null) {
+                                Map<String, Integer> playerBlocks = data.getPlayerBlocks(playerId);
+                                if (!playerBlocks.isEmpty()) {
+                                    result.put(data.chunkKey != null ? data.chunkKey : chunkKey, new java.util.HashMap<>(playerBlocks));
+                                }
+                            }
+                        } catch (Exception e) {
+                            Constants.LOGGER.debug("Failed to read chunk file {}: {}", file, e.getMessage());
+                        }
+                    });
+            }
+        } catch (IOException e) {
+            Constants.LOGGER.error("Failed to scan data directory", e);
+        }
+        
+        // Also check cached chunks (might have unsaved data)
+        for (Map.Entry<String, ChunkBlockData> entry : cache.entrySet()) {
+            Map<String, Integer> playerBlocks = entry.getValue().getPlayerBlocks(playerId);
+            if (!playerBlocks.isEmpty()) {
+                result.put(entry.getKey(), new java.util.HashMap<>(playerBlocks));
+            }
+        }
+        
+        return result;
+    }
+
+    /**
      * Get stats for debugging.
      */
     public int getCachedChunkCount() {

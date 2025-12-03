@@ -4,22 +4,23 @@ A Fabric mod that limits the number of specific blocks players can place per chu
 
 ## Features
 
-- **Per-Player, Per-Chunk Tracking** - Each player has their own limit in each chunk
+- **Chunk-Accurate Limits** - Enforcement is based on scanning the real blocks in the chunk, so it cannot be spoofed
+- **Best-Effort Player Visibility** - Admins can see per-player tracked placements alongside the authoritative chunk totals
 - **Block Breaking Restores Slots** - When you break a limited block, you get that "slot" back
 - **Admin Bypass** - OPs can bypass all limits
 - **Fully Configurable** - Set limits for any block via JSON config
 - **Warning System** - Warns players when approaching limits
 - **MiniMessage Support** - Rich text formatting for messages
-- **Commands** - Check your limits, view config, admin tools
+- **Commands** - Check chunk contents, view config, admin tools
 
 ## Commands
 
 | Command | Description | Permission |
 |---------|-------------|------------|
 | `/chunklimit` or `/cl` | Show help | Everyone |
-| `/chunklimit check` | Check your block counts in current chunk | Everyone |
+| `/chunklimit scan` | Scan current chunk for limited blocks (authoritative) | Everyone |
 | `/chunklimit limits` | Show all configured block limits | Everyone |
-| `/chunklimit checkplayer <player>` | Check another player's counts | OP |
+| `/chunklimit check <player>` | Show actual blocks in each chunk + tracked~ counts for that player | OP |
 | `/chunklimit reload` | Reload configuration | OP |
 | `/chunklimit clear <player>` | Clear a player's data in current chunk | OP |
 | `/chunklimit debug` | Show debug information | OP |
@@ -93,11 +94,17 @@ Use `/chunklimit reload` to apply changes without restarting.
 
 ## How It Works
 
-1. When a player places a limited block, the mod checks their count for that chunk
-2. If under the limit, placement is allowed and count is incremented
+1. When a player places a limited block, the mod scans the real chunk to compare against the configured limit (no spoofing)
+2. If under the limit, placement is allowed and cached for a few seconds for performance
 3. If at the limit, placement is blocked and a message is shown
-4. When ANY player breaks a limited block, the original placer's count is decremented
+4. A best-effort per-player tracker records who placed what so admins can see who likely owns blocks (explosions/rollbacks may make this drift)
 5. Data persists across server restarts
+
+### Admin Player Checks
+
+- `/chunklimit check <player>` lists each chunk where that player is tracked.
+- **Actual** counts come from a fresh chunk scan (authoritative).
+- **Tracked~** counts come from the per-player log and may be off if blocks moved/vanished without being broken normally.
 
 ## Data Storage
 
