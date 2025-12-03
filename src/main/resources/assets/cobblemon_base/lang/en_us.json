@@ -1,0 +1,4 @@
+{
+  "command.cobblemon_base.reload": "Reloaded cobblemon_base config.",
+  "message.cobblemon_base.capture": "<green>[CobbleBase]</green> <yellow>%player%</yellow> caught a Pokemon!"
+}

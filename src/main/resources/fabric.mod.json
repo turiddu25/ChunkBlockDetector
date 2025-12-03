@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "chunk_block_limiter",
+  "version": "${version}",
+  "name": "Chunk Block Limiter",
+  "description": "Limit the number of specific blocks players can place per chunk. Configurable per-block limits with admin bypass.",
+  "authors": [
+    "Colin"
+  ],
+  "license": "MIT",
+  "environment": "server",
+  "entrypoints": {
+    "main": [
+      "com.chunklimiter.ChunkBlockLimiter"
+    ]
+  },
+  "mixins": [
+    "chunklimiter.mixins.json"
+  ],
+  "depends": {
+    "java": ">=21",
+    "minecraft": ">=1.21",
+    "fabricloader": ">=0.15.0",
+    "fabric-api": "*"
+  },
+  "suggests": {
+    "cobblemon": "*"
+  }
+}
