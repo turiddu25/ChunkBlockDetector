@@ -23,6 +23,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class ChunkBlockLimiter implements ModInitializer {
@@ -33,10 +34,10 @@ public class ChunkBlockLimiter implements ModInitializer {
     private static MinecraftServer server;
     private static final MiniMessage MINI = MiniMessage.miniMessage();
     
-    // Cache for chunk block counts: "dimension_chunkX_chunkZ_blockId" -> count
-    // This cache is invalidated when blocks are placed/broken
+    // Cache for chunk block counts: "dimension_chunkX_chunkZ_blockId" -> count (per block type)
     private static final Map<String, CachedCount> countCache = new ConcurrentHashMap<>();
-    private static final long CACHE_DURATION_MS = 5000; // 5 second cache
+    private static final long CACHE_DURATION_MS = 30_000; // 30s cache to avoid repeated scans
+    private static final Set<String> seededCounts = ConcurrentHashMap.newKeySet();
     
     private int tickCounter = 0;
     private static final int SAVE_INTERVAL_TICKS = 6000; // 5 minutes
@@ -53,6 +54,10 @@ public class ChunkBlockLimiter implements ModInitializer {
         boolean isExpired() {
             return System.currentTimeMillis() - timestamp > CACHE_DURATION_MS;
         }
+    }
+    
+    private static String seedKey(ServerLevel level, ChunkPos chunkPos, String blockId) {
+        return level.dimension().location() + "_" + chunkPos.x + "_" + chunkPos.z + "_" + blockId;
     }
 
     @Override
@@ -82,6 +87,7 @@ public class ChunkBlockLimiter implements ModInitializer {
                 adventure = null;
             }
             countCache.clear();
+            seededCounts.clear();
             server = null;
         });
 
@@ -135,35 +141,44 @@ public class ChunkBlockLimiter implements ModInitializer {
             return false; // No limit configured
         }
 
-        // Count actual blocks in the chunk (this is the foolproof part)
-        int currentCount = countBlocksInChunk(level, pos, blockId);
-
-        // Check if at or over limit
-        if (currentCount >= limit) {
-            // Send limit reached message
-            if (config.get().sendLimitMessage && adventure != null) {
-                String message = config.get().limitReachedMessage;
-                Component parsed = MINI.deserialize(message,
-                    Placeholder.unparsed("block", formatBlockName(blockId)),
-                    Placeholder.unparsed("limit", String.valueOf(limit)),
-                    Placeholder.unparsed("current", String.valueOf(currentCount))
-                );
-                adventure.player(player.getUUID()).sendMessage(parsed);
+        // If storage is unavailable, fall back to a one-off scan
+        if (storage == null) {
+            int worldCount = countBlocksInChunk(level, pos, blockId);
+            if (worldCount >= limit) {
+                sendLimitReached(player, blockId, limit, worldCount);
+                return true;
             }
-            return true; // BLOCK the placement
+            return false;
         }
 
-        // Check for warning threshold
-        if (config.get().showWarnings && (currentCount + 1) >= limit * config.get().warningThreshold) {
-            if (adventure != null) {
-                String message = config.get().limitWarningMessage;
-                Component parsed = MINI.deserialize(message,
-                    Placeholder.unparsed("block", formatBlockName(blockId)),
-                    Placeholder.unparsed("limit", String.valueOf(limit)),
-                    Placeholder.unparsed("current", String.valueOf(currentCount + 1))
-                );
-                adventure.player(player.getUUID()).sendMessage(parsed);
+        ChunkPos chunkPos = new ChunkPos(pos);
+        String seedKey = seedKey(level, chunkPos, blockId);
+        int trackedCount = storage.getTotalCount(level.dimension(), pos, blockId);
+
+        // One-time seed from world if this chunk/block hasn't been initialised and is currently empty in counters
+        if (trackedCount == 0 && !seededCounts.contains(seedKey)) {
+            int actualCount = countBlocksInChunk(level, pos, blockId);
+            if (actualCount > 0) {
+                storage.seedBlockCount(level.dimension(), chunkPos, blockId, actualCount);
+                trackedCount = actualCount;
             }
+            seededCounts.add(seedKey);
+        }
+
+        int nextCount = trackedCount + 1;
+
+        if (nextCount > limit) {
+            sendLimitReached(player, blockId, limit, trackedCount);
+            return true;
+        }
+
+        // Optional warning using counters only
+        double warnThreshold = config.get().warningThreshold;
+        if (config.get().showWarnings
+                && warnThreshold > 0.0
+                && nextCount >= limit * warnThreshold
+                && nextCount < limit) {
+            sendLimitWarning(player, blockId, limit, nextCount);
         }
 
         return false; // ALLOW the placement
@@ -204,10 +219,11 @@ public class ChunkBlockLimiter implements ModInitializer {
         int startX = chunkPos.getMinBlockX();
         int startZ = chunkPos.getMinBlockZ();
         
+        BlockPos.MutableBlockPos checkPos = new BlockPos.MutableBlockPos();
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
                 for (int y = minY; y < maxY; y++) {
-                    BlockPos checkPos = new BlockPos(startX + x, y, startZ + z);
+                    checkPos.set(startX + x, y, startZ + z);
                     BlockState state = chunk.getBlockState(checkPos);
                     if (state.is(targetBlock)) {
                         count++;
@@ -228,12 +244,12 @@ public class ChunkBlockLimiter implements ModInitializer {
     }
 
     /**
-     * Invalidate cache for a chunk when blocks change.
+     * Invalidate cache for a chunk when blocks change for a specific block type.
      */
-    public static void invalidateChunkCache(ServerLevel level, BlockPos pos) {
+    public static void invalidateChunkCache(ServerLevel level, BlockPos pos, String blockId) {
         ChunkPos chunkPos = new ChunkPos(pos);
-        String prefix = level.dimension().location() + "_" + chunkPos.x + "_" + chunkPos.z + "_";
-        countCache.entrySet().removeIf(e -> e.getKey().startsWith(prefix));
+        String cacheKey = level.dimension().location() + "_" + chunkPos.x + "_" + chunkPos.z + "_" + blockId;
+        countCache.remove(cacheKey);
     }
 
     /**
@@ -250,7 +266,7 @@ public class ChunkBlockLimiter implements ModInitializer {
 
         // Invalidate cache for this chunk
         if (player.level() instanceof ServerLevel serverLevel) {
-            invalidateChunkCache(serverLevel, pos);
+            invalidateChunkCache(serverLevel, pos, blockId);
         }
 
         // Skip per-player tracking if player has bypass
@@ -261,11 +277,8 @@ public class ChunkBlockLimiter implements ModInitializer {
         tracker.recordPlacement(player.level().dimension(), pos, player.getUUID());
 
         if (config.get().debug) {
-            int chunkCount = 0;
-            if (player.level() instanceof ServerLevel serverLevel) {
-                chunkCount = countBlocksInChunk(serverLevel, pos, blockId);
-            }
-            Constants.LOGGER.info("[DEBUG] Block placed: {} at {} by {} (chunk total: {})", 
+            int chunkCount = storage.getTotalCount(player.level().dimension(), pos, blockId);
+            Constants.LOGGER.info("[DEBUG] Block placed: {} at {} by {} (chunk total: {})",
                 blockId, pos, player.getScoreboardName(), chunkCount);
         }
     }
@@ -284,7 +297,7 @@ public class ChunkBlockLimiter implements ModInitializer {
 
         // Invalidate cache for this chunk
         if (breaker.level() instanceof ServerLevel serverLevel) {
-            invalidateChunkCache(serverLevel, pos);
+            invalidateChunkCache(serverLevel, pos, blockId);
         }
 
         // Find who placed this block and update per-player tracking
@@ -292,12 +305,37 @@ public class ChunkBlockLimiter implements ModInitializer {
         
         if (placerId != null) {
             storage.decrementBlock(breaker.level().dimension(), pos, placerId, blockId);
-            
-            if (config.get().debug) {
-                Constants.LOGGER.info("[DEBUG] Block broken: {} at {} by {} (placer: {})", 
-                    blockId, pos, breaker.getScoreboardName(), placerId);
-            }
+        } else {
+            // Unknown placer (likely seeded/pre-mod); decrement system bucket
+            storage.decrementSystemBlock(breaker.level().dimension(), pos, blockId);
         }
+        
+        if (config.get().debug) {
+            Constants.LOGGER.info("[DEBUG] Block broken: {} at {} by {} (placer: {})", 
+                blockId, pos, breaker.getScoreboardName(), placerId);
+        }
+    }
+
+    private static void sendLimitReached(ServerPlayer player, String blockId, int limit, int current) {
+        if (!config.get().sendLimitMessage || adventure == null) return;
+        String message = config.get().limitReachedMessage;
+        Component parsed = MINI.deserialize(message,
+            Placeholder.unparsed("block", formatBlockName(blockId)),
+            Placeholder.unparsed("limit", String.valueOf(limit)),
+            Placeholder.unparsed("current", String.valueOf(current))
+        );
+        adventure.player(player.getUUID()).sendMessage(parsed);
+    }
+
+    private static void sendLimitWarning(ServerPlayer player, String blockId, int limit, int current) {
+        if (adventure == null) return;
+        String message = config.get().limitWarningMessage;
+        Component parsed = MINI.deserialize(message,
+            Placeholder.unparsed("block", formatBlockName(blockId)),
+            Placeholder.unparsed("limit", String.valueOf(limit)),
+            Placeholder.unparsed("current", String.valueOf(current))
+        );
+        adventure.player(player.getUUID()).sendMessage(parsed);
     }
 
     private static String formatBlockName(String blockId) {

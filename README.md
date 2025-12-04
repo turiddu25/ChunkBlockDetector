@@ -13,6 +13,10 @@ A Fabric mod that limits the number of specific blocks players can place per chu
 - **MiniMessage Support** - Rich text formatting for messages
 - **Commands** - Check chunk contents, view config, admin tools
 
+## Warning
+
+This mod tracks blocks based on how much space they take up in a chunk. A two-block-tall block (like a bed) counts as 2 towards the limit. Adjust your limits accordingly.
+
 ## Commands
 
 | Command | Description | Permission |
@@ -20,9 +24,9 @@ A Fabric mod that limits the number of specific blocks players can place per chu
 | `/chunklimit` or `/cl` | Show help | Everyone |
 | `/chunklimit scan` | Scan current chunk for limited blocks (authoritative) | Everyone |
 | `/chunklimit limits` | Show all configured block limits | Everyone |
-| `/chunklimit check <player>` | Show actual blocks in each chunk + tracked~ counts for that player | OP |
+| `/chunklimit summary <player>` | Show tracked totals for a player (no chunk scan) | OP |
 | `/chunklimit reload` | Reload configuration | OP |
-| `/chunklimit clear <player>` | Clear a player's data in current chunk | OP |
+| `/chunklimit clear <player>` | Clear a player's data in current chunk | USELESS RIGHT NOW|
 | `/chunklimit debug` | Show debug information | OP |
 | `/chunklimit save` | Force save all data | OP |
 
@@ -51,8 +55,8 @@ Config file: `config/chunk_block_limiter/config.json`
   },
   "bypassPermissionLevel": 2,
   "sendLimitMessage": true,
-  "limitReachedMessage": "<red>You can only place <yellow>%limit%</yellow> <gold>%block%</gold> per chunk! (Currently: %current%)</red>",
-  "limitWarningMessage": "<yellow>Warning: You have placed <gold>%current%/%limit%</gold> %block% in this chunk.</yellow>",
+  "limitReachedMessage": "<red>You can only place <yellow><limit></yellow> <gold><block></gold> per chunk! (Currently: <current>)</red>",
+  "limitWarningMessage": "<yellow>Warning: You have placed <gold><current>/<limit></gold> <block> in this chunk.</yellow>",
   "warningThreshold": 0.8,
   "showWarnings": true
 }
@@ -73,9 +77,9 @@ Config file: `config/chunk_block_limiter/config.json`
 
 ### Message Placeholders
 
-- `%block%` - Block name (e.g., "hopper")
-- `%limit%` - Maximum allowed per chunk
-- `%current%` - Current count placed
+- `<block>` - Block name (e.g., "hopper")
+- `<limit>` - Maximum allowed per chunk
+- `<current>` - Current count placed
 
 ### Adding Custom Blocks
 
@@ -94,17 +98,21 @@ Use `/chunklimit reload` to apply changes without restarting.
 
 ## How It Works
 
-1. When a player places a limited block, the mod scans the real chunk to compare against the configured limit (no spoofing)
-2. If under the limit, placement is allowed and cached for a few seconds for performance
-3. If at the limit, placement is blocked and a message is shown
-4. A best-effort per-player tracker records who placed what so admins can see who likely owns blocks (explosions/rollbacks may make this drift)
-5. Data persists across server restarts
+1. On the first placement of a limited block in a chunk (and only if counters are zero), the mod runs one real chunk scan to seed counts (picks up pre-mod builds).
+2. After seeding, placements/breaks are O(1) counter updates via mixins; no more scans for that chunk+block combo.
+3. If over the limit, placement is blocked and a message is shown; warnings use the tracked counts.
+4. Data persists across server restarts.
 
 ### Admin Player Checks
 
-- `/chunklimit check <player>` lists each chunk where that player is tracked.
-- **Actual** counts come from a fresh chunk scan (authoritative).
-- **Tracked~** counts come from the per-player log and may be off if blocks moved/vanished without being broken normally.
+- `/chunklimit summary <player>`: tracked totals only (no chunk scanning, instant).
+- `/chunklimit scan`: live authoritative counts for the chunk you are standing in.
+
+### Performance Note
+
+- Each (chunk, block type) is scanned at most once to seed counters; after that enforcement is pure counter math.
+- Chunk scans are still cached per block type per chunk for ~30 seconds (useful for `/chunklimit scan`) and invalidated only when that block type changes.
+
 
 ## Data Storage
 
@@ -113,19 +121,11 @@ Use `/chunklimit reload` to apply changes without restarting.
 
 ## Installation
 
-1. Install [Fabric Loader](https://fabricmc.net/) for Minecraft 1.21+
-2. Install [Fabric API](https://modrinth.com/mod/fabric-api)
-3. Place the mod JAR in your `mods/` folder
-4. Start the server - config will be auto-generated
-5. Customize `config/chunk_block_limiter/config.json` as needed
+1. Install [Fabric API](https://modrinth.com/mod/fabric-api)
+2. Place the mod JAR in your `mods/` folder
+3. Start the server - config will be auto-generated
+4. Customize `config/chunk_block_limiter/config.json` as needed
 
-## Building
-
-```bash
-./gradlew build
-```
-
-Output will be in `build/libs/`.
 
 ## License
 

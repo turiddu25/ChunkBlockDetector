@@ -27,6 +27,7 @@ public class ChunkBlockStorage {
             .getConfigDir()
             .resolve(Constants.MOD_ID)
             .resolve("data");
+    public static final UUID SYSTEM_UUID = new UUID(0L, 0L);
 
     /** In-memory cache: ChunkKey -> ChunkBlockData */
     private final Map<String, ChunkBlockData> cache = new ConcurrentHashMap<>();
@@ -80,6 +81,27 @@ public class ChunkBlockStorage {
     }
 
     /**
+     * Seed a chunk's total count for a block across all players (used after one-time scan).
+     */
+    public void seedBlockCount(ResourceKey<Level> dimension, ChunkPos chunkPos, String blockId, int totalCount) {
+        ChunkBlockData data = getOrCreate(dimension, chunkPos);
+        int existing = data.getTotalCount(blockId);
+        int toAdd = totalCount - existing;
+        if (toAdd <= 0) return;
+
+        data.addToPlayer(SYSTEM_UUID, blockId, toAdd);
+        markDirty(getChunkKey(dimension, chunkPos));
+    }
+
+    /**
+     * Get total count of a block across all players in a chunk.
+     */
+    public int getTotalCount(ResourceKey<Level> dimension, BlockPos pos, String blockId) {
+        ChunkBlockData data = getOrCreate(dimension, pos);
+        return data.getTotalCount(blockId);
+    }
+
+    /**
      * Increment block count when a player places a block.
      * @return the new count
      */
@@ -100,6 +122,18 @@ public class ChunkBlockStorage {
         String key = getChunkKey(dimension, pos);
         ChunkBlockData data = getOrCreate(dimension, pos);
         int newCount = data.decrement(playerId, blockId);
+        markDirty(key);
+        return newCount;
+    }
+
+    /**
+     * Decrement a block from the system bucket (used for seeded counts when placer is unknown).
+     * @return the new count (minimum 0)
+     */
+    public int decrementSystemBlock(ResourceKey<Level> dimension, BlockPos pos, String blockId) {
+        String key = getChunkKey(dimension, pos);
+        ChunkBlockData data = getOrCreate(dimension, pos);
+        int newCount = data.decrement(SYSTEM_UUID, blockId);
         markDirty(key);
         return newCount;
     }

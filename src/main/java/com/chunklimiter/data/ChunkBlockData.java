@@ -45,6 +45,18 @@ public class ChunkBlockData {
     }
 
     /**
+     * Add an amount to a player's count (used for system seeding).
+     */
+    public void addToPlayer(UUID playerId, String blockId, int amount) {
+        if (amount <= 0) return;
+        Map<String, Integer> playerData = playerBlocks.computeIfAbsent(
+            playerId.toString(),
+            k -> new HashMap<>()
+        );
+        playerData.merge(blockId, amount, Integer::sum);
+    }
+
+    /**
      * Decrement the count of a block for a player.
      * @return the new count (minimum 0)
      */
